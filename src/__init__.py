@@ -1,3 +1,4 @@
+from .cache import MovieCache
 from .middleware import log_requests
 from .models import (
     HealthResponse,
@@ -7,4 +8,4 @@ from .models import (
     ProcessConfig,
 )
 from .storage import MovieStorage
-from .utils import setup_logging
+from .utils import setup_logging	
