@@ -8,6 +8,7 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from data_pipeline import create_cleaning_report, process_data, validate_dataframe
 from src import (
     HealthResponse,
+    MovieCache,
     MovieDataResponse,
     MovieProcessingReport,
     MovieStorage,
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Data Processing API", version="1.0.0")
 app.middleware("http")(log_requests)
 storage = MovieStorage()
+cache = MovieCache()
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -35,7 +37,6 @@ def health_check():
 @app.post("/upload", response_model=MovieUploadInfo)
 async def upload_movies(file: UploadFile = File(...)):
     """Read a CSV upload and replace the stored movie collection."""
-    # TODO 1: .csv check, read, and parse (kept from MP2)
     filename = file.filename or ""
     suffix = Path(filename).suffix.lower()
     if suffix != ".csv":
@@ -55,7 +56,6 @@ async def upload_movies(file: UploadFile = File(...)):
             detail=f"Could not read CSV file: {e}",
         ) from e
 
-    # TODO 2: quick validation before saving
     if set(df.columns) != set(MOVIE_COLUMNS):
         logger.warning(f"Unexpected columns in {filename}: {list(df.columns)}")
         raise HTTPException(
@@ -69,8 +69,8 @@ async def upload_movies(file: UploadFile = File(...)):
 
     df = df[MOVIE_COLUMNS]
 
-    # TODO 3: replace the stored collection
     storage.save(df)
+    cache.invalidate()
     logger.info(f"Uploaded movies: filename={filename}, rows={len(df)}")
     return MovieUploadInfo(
         filename=filename,
@@ -83,10 +83,18 @@ async def upload_movies(file: UploadFile = File(...)):
 @app.get("/movies", response_model=MovieDataResponse)
 def get_movies(limit: int = Query(default=100, ge=1)):
     """Return up to limit stored movies and the total count."""
+    cached = cache.get(limit)
+    if cached is not None:
+        logger.info(f"Served movies from cache: limit={limit}")
+        return cached
+
     records = storage.select_columns(MOVIE_COLUMNS, limit=limit)
     total_rows = storage.count_movies()
+    response = {"data": records, "total_rows": total_rows}
+
+    cache.set(limit, response)
     logger.info(f"Retrieved movies: returned_rows={len(records)}")
-    return {"data": records, "total_rows": total_rows}
+    return response
 
 
 @app.get("/movies/search", response_model=list[dict])
@@ -111,13 +119,11 @@ def query_movies(
 @app.post("/movies/process", response_model=MovieProcessingReport)
 def process_movies(config: ProcessConfig):
     """Validate and process the stored movies using MP1 functions."""
-    # TODO 1: retrieve the stored movies
     df = storage.get()
     if df.empty:
         logger.warning("No movies to process")
         raise HTTPException(status_code=400, detail="No movies to process. Upload a CSV first.")
 
-    # TODO 2: MP2's validation and processing, without dataset_id
     config_dict = config.model_dump()
     required_columns = config_dict["validation"]["required_columns"]
     numeric_columns = config_dict["validation"]["numeric_columns"]
@@ -143,8 +149,8 @@ def process_movies(config: ProcessConfig):
         logger.warning(f"Processing failed: {error}")
         raise HTTPException(status_code=400, detail=str(error)) from error
 
-    # TODO 3: save the processed movies
     storage.save(processed)
+    cache.invalidate()
     logger.info(
         f"Processed movies: validation_removed={validation_rows_removed}, "
         f"rows_before={report['rows_before']}, rows_after={report['rows_after']}"
